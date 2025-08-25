@@ -25,11 +25,11 @@ async function injectAndRun(tabId, opts) {
   const {
     closeOnSuccess = true,
     // Timings (ms)
-    delayOpen   = 1500,
-    delayClick  = 1500,
-    delayClose  = 1500,
-    delayReopen = 1500,
-    maxAttempts = 6,
+    delayOpen   = 2474,
+    delayClick  = 2474,
+    delayClose  = 2474,
+    delayReopen = 4747,
+    maxAttempts = 7,
   } = opts || {};
 
   const runner = async (timing) => {
@@ -346,11 +346,11 @@ async function processTabs({
       const r = await injectAndRun(t.id, {
         closeOnSuccess,
         // slight extra padding for Shorts stability
-        delayOpen: 1600,
-        delayClick: 1600,
-        delayClose: 1600,
-        delayReopen: 1600,
-        maxAttempts: 6
+        delayOpen: 2474,
+        delayClick: 2474,
+        delayClose: 2474,
+        delayReopen: 4747,
+        maxAttempts: 7
       });
       res.processed++;
       if (r.ok) {
@@ -392,3 +392,4 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   })();
   return true;
 });
+
