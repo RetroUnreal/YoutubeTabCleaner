@@ -29,9 +29,12 @@ async function injectAndRun(tabId, opts) {
     delayClick  = 2474,
     delayClose  = 2474,
     delayReopen = 4747,
+    delayReload = 4747,   // wait after a service-worker-triggered reload
     maxAttempts = 7,
+    reloadMax   = 3,      // max reloads the SW will do if Shorts UI is missing
   } = opts || {};
 
+  // Run the page-side logic once
   const runner = async (timing) => {
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     const norm  = (s) => (s || "").trim().toLowerCase();
@@ -41,7 +44,6 @@ async function injectAndRun(tabId, opts) {
       const cs = getComputedStyle(el);
       return r.width > 0 && r.height > 0 && cs.visibility !== "hidden" && cs.display !== "none";
     };
-
     const waitFor = async (sel, timeout = 9000, root = document) => {
       const t0 = performance.now();
       while (performance.now() - t0 < timeout) {
@@ -82,6 +84,30 @@ async function injectAndRun(tabId, opts) {
       return null;
     };
 
+    // ---------- Shorts UI guard (detect only; do NOT reload here) ----------
+    const shortsUiLikelyPresent = () => {
+      // Be generous: any of these implies the UI is mounted
+      return !!document.querySelector(
+        [
+          // header/overlay menus
+          'ytd-reel-player-header-renderer ytd-menu-renderer',
+          'ytd-reel-player-overlay-renderer ytd-menu-renderer',
+          // kebab buttons with aria labels
+          'ytd-reel-player-header-renderer [aria-label*="more" i]',
+          'ytd-reel-player-overlay-renderer [aria-label*="more" i]',
+          // direct save action sometimes appears
+          'ytd-reel-player-overlay-renderer [aria-label*="save" i]',
+          // actions rail presence is also fine
+          'ytd-reel-player-overlay-renderer #actions',
+        ].join(', ')
+      );
+    };
+
+    if (isShorts && !shortsUiLikelyPresent()) {
+      // Tell the service worker we want a reload + reinjection
+      return { ok: false, needsReload: true, error: "Shorts UI not ready" };
+    }
+
     // ---- OPEN SAVE DIALOG (watch) ----
     const openSaveDialogWatch = async () => {
       const meta = await waitFor("ytd-watch-metadata", 9000);
@@ -94,6 +120,7 @@ async function injectAndRun(tabId, opts) {
         document.querySelector("ytd-watch-metadata ytd-menu-renderer"),
       ].filter(Boolean);
 
+      // nudge layout
       window.scrollBy({ top: 1, behavior: "instant" }); await sleep(60);
       window.scrollBy({ top: -1, behavior: "instant" });
 
@@ -119,7 +146,7 @@ async function injectAndRun(tabId, opts) {
         const btns = meta.querySelectorAll("yt-icon-button button, #button-shape button");
         for (const b of btns) {
           const al = norm(b.getAttribute("aria-label"));
-          if (/more|more actions|options|menu/.test(al)) return b;
+          if (/more|more actions|options|menu/i.test(al || "")) return b;
         }
         return null;
       };
@@ -153,12 +180,9 @@ async function injectAndRun(tabId, opts) {
 
     // ---- OPEN SAVE DIALOG (shorts) ----
     const openSaveDialogShorts = async () => {
-      // Stable containers seen across layouts
-      // Header kebab usually lives under: ytd-reel-player-header-renderer ytd-menu-renderer … button[aria-label*="More"]
       const overlay = await waitFor("ytd-reel-player-overlay-renderer, ytd-reel-video-renderer, ytd-reel-player-header-renderer", 9000);
       if (!overlay) return { dialog: null, via: "shorts", error: "Shorts overlay not found" };
 
-      // 1) Try header kebab (top-right three dots)
       const findHeaderKebab = () => {
         const scopes = [
           document.querySelector("ytd-reel-player-header-renderer"),
@@ -177,25 +201,23 @@ async function injectAndRun(tabId, opts) {
           for (const b of btns) {
             const al = norm(b.getAttribute("aria-label"));
             if (!al) continue;
-            if (/(more|more actions|options|menu)/.test(al) && isVisible(b)) return b;
+            if (/(more|more actions|options|menu)/i.test(al) && isVisible(b)) return b;
           }
         }
         return null;
       };
 
-      // 2) Some builds expose a direct “Save” button in the Shorts actions stack
       const findDirectSaveAction = () => {
         const candidates = document.querySelectorAll(
           "ytd-reel-player-overlay-renderer button, ytd-reel-player-overlay-renderer a, button, a"
         );
         for (const el of candidates) {
           const txt = norm((el.textContent || "") + " " + (el.getAttribute("aria-label") || ""));
-          if (isVisible(el) && (txt.includes("save") || txt.includes("save to playlist"))) return el;
+          if (isVisible(el) && (txt.includes("save to playlist") || txt.includes("save"))) return el;
         }
         return null;
       };
 
-      // Try direct save first if visible
       const directSave = findDirectSaveAction();
       if (directSave) {
         directSave.click();
@@ -203,7 +225,6 @@ async function injectAndRun(tabId, opts) {
         if (dlg) return { dialog: dlg, via: "shorts_direct" };
       }
 
-      // Fallback to kebab menu
       const kebabBtn = findHeaderKebab();
       if (!kebabBtn) return { dialog: null, via: "shorts", error: "Shorts kebab not found" };
 
@@ -214,7 +235,6 @@ async function injectAndRun(tabId, opts) {
       const popup = await waitFor("ytd-menu-popup-renderer", 6000);
       if (!popup) return { dialog: null, via: "shorts", error: "Shorts menu did not open" };
 
-      // Menu items: look for “Save to playlist” or “Save”
       const items = popup.querySelectorAll("tp-yt-paper-item, ytd-menu-navigation-item-renderer, ytd-menu-service-item-renderer");
       let saveItem = null;
       for (const it of items) {
@@ -229,19 +249,17 @@ async function injectAndRun(tabId, opts) {
     };
 
     const openSaveDialog = async () => {
-      if (isShorts) {
-        return await openSaveDialogShorts();
-      } else {
-        return await openSaveDialogWatch();
-      }
+      if (isShorts) return await openSaveDialogShorts();
+      return await openSaveDialogWatch();
     };
 
     // ---- Attempt loop: open → wait → (check/click) → wait → close → wait → reopen → wait → verify ----
     let via = isShorts ? "shorts" : "watch";
     for (let attempt = 1; attempt <= timing.maxAttempts; attempt++) {
-
       const open1 = await openSaveDialog();
       if (!open1.dialog) {
+        if (open1.error && /Shorts.*not found|menu did not open|Shorts overlay/.test(open1.error))
+          return { ok: false, needsReload: true, error: open1.error }; // tell SW to reload/retry
         if (attempt === timing.maxAttempts) return { ok: false, error: open1.error || "Save dialog did not appear (first open)" };
         await sleep(350);
         continue;
@@ -267,6 +285,8 @@ async function injectAndRun(tabId, opts) {
 
       const open2 = await openSaveDialog();
       if (!open2.dialog) {
+        if (open2.error && /Shorts/.test(open2.error))
+          return { ok: false, needsReload: true, error: open2.error };
         if (attempt === timing.maxAttempts) return { ok: false, error: open2.error || "Save dialog did not appear (second open)" };
         await sleep(350);
         continue;
@@ -296,20 +316,31 @@ async function injectAndRun(tabId, opts) {
     return { ok: false, error: "Watch later not confirmed after retries", via, confirmed: false };
   };
 
-  const [inj] = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: runner,
-    args: [{
-      delayOpen, delayClick, delayClose, delayReopen, maxAttempts
-    }]
-  });
+  // Service-worker loop: handle Shorts reloads + reinjection here
+  let reloads = 0;
+  while (true) {
+    const [inj] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: runner,
+      args: [{ delayOpen, delayClick, delayClose, delayReopen, delayReload, maxAttempts }]
+    });
 
-  const result = inj?.result || { ok: false, error: "No result from content script" };
+    const result = inj?.result || { ok: false, error: "No result from content script" };
 
-  if (result.ok && closeOnSuccess) {
-    try { await chrome.tabs.remove(tabId); } catch {}
+    if (result.needsReload && reloads < reloadMax) {
+      // SW-controlled reload + wait, then loop to reinject
+      try { await chrome.tabs.reload(tabId); } catch {}
+      await sleep(delayReload);
+      reloads++;
+      continue;
+    }
+
+    // Final outcome
+    if (result.ok && closeOnSuccess) {
+      try { await chrome.tabs.remove(tabId); } catch {}
+    }
+    return result;
   }
-  return result;
 }
 
 // ---------- Batch processor ----------
@@ -345,12 +376,13 @@ async function processTabs({
     try {
       const r = await injectAndRun(t.id, {
         closeOnSuccess,
-        // slight extra padding for Shorts stability
         delayOpen: 2474,
         delayClick: 2474,
         delayClose: 2474,
         delayReopen: 4747,
-        maxAttempts: 7
+        delayReload: 4747,
+        maxAttempts: 7,
+        reloadMax: 3,
       });
       res.processed++;
       if (r.ok) {
@@ -392,4 +424,3 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   })();
   return true;
 });
-
