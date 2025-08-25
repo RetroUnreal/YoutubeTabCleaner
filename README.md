@@ -7,11 +7,13 @@ If some videos are still not getting added to your watch later, increase the ret
 (Change both delays, one is for videos, the other for shorts.):
 
 ```js
-        delayOpen: 2474,
-        delayClick: 2474,
-        delayClose: 2474,
-        delayReopen: 4747,
-        maxAttempts: 7
+    delayOpen   = 2474,
+    delayClick  = 2474,
+    delayClose  = 2474,
+    delayReopen = 4747,
+    delayReload = 4747,   // wait after a service-worker-triggered reload
+    maxAttempts = 7,
+    reloadMax   = 3,      // max reloads the SW will do if Shorts UI is missing
 };
 ```
 
