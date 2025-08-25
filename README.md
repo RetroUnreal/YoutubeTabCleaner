@@ -15,5 +15,5 @@ const config = {
 };
 ```
 
-# Instalation instructions:
+# Installation instructions:
 Simply download the release, unzip it and add it to your browser extensions with "Load Unpacked" (You need to be in DEV mode for this!)
