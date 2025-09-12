@@ -3,6 +3,8 @@ Chrome Browser Extension that adds all open Youtube video tabs to your watch lat
 
 The extension will retry multiple times because the Youtube UI is kind of buggy, else it didnt actually add all videos to watch later.
 
+Its best to open the first YouTube Tab in your Browser for it to work.
+
 If some videos are still not getting added to your watch later, increase the retries or delays near the top & bottom of background.js\
 (Change both delays, one is for videos, the other for shorts.):
 
