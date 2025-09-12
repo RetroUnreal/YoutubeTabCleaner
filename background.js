@@ -1,7 +1,7 @@
 // background.js — MV3 service worker
 // Adds YouTube videos (watch + shorts) to Watch Later with a verified flow.
-// Shorts are handled IN-PLACE (no navigation).
-// Retries per tab; closes only when confirmed. Optional: close non-video YT tabs.
+// Shorts handled IN-PLACE. Verifies by reopening dialog. Optionally closes non-video YT tabs.
+// Focuses each YT tab before running, and waits for tab closure before moving on.
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -20,6 +20,45 @@ function extractVideoIdFromUrl(u) {
   return null;
 }
 
+function isYouTubeUrl(u) {
+  try {
+    const { hostname } = new URL(u);
+    return /(^|\.)youtube\.com$/.test(hostname) || hostname === "youtu.be" || hostname === "music.youtube.com";
+  } catch {
+    return false;
+  }
+}
+
+// ---------- helpers ----------
+async function waitForTabClosed(tabId, timeout = 5000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeout) {
+    try {
+      await chrome.tabs.get(tabId); // still exists
+    } catch {
+      return true; // thrown = tab is gone
+    }
+    await sleep(100);
+  }
+  return false;
+}
+
+async function ensureFocused(tab) {
+  try {
+    if (tab.windowId != null) {
+      const w = await chrome.windows.get(tab.windowId, { populate: false });
+      if (!w.focused) {
+        await chrome.windows.update(tab.windowId, { focused: true });
+      }
+    }
+    if (!tab.active) {
+      await chrome.tabs.update(tab.id, { active: true });
+    }
+  } catch {
+    // best effort; continue
+  }
+}
+
 // ---------- Per-tab runner (executes in the page) ----------
 async function injectAndRun(tabId, opts) {
   const {
@@ -29,12 +68,10 @@ async function injectAndRun(tabId, opts) {
     delayClick  = 2474,
     delayClose  = 2474,
     delayReopen = 4747,
-    delayReload = 4747,   // wait after a service-worker-triggered reload
     maxAttempts = 7,
-    reloadMax   = 3,      // max reloads the SW will do if Shorts UI is missing
+    postRefreshDelay = 2000,
   } = opts || {};
 
-  // Run the page-side logic once
   const runner = async (timing) => {
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     const norm  = (s) => (s || "").trim().toLowerCase();
@@ -44,6 +81,7 @@ async function injectAndRun(tabId, opts) {
       const cs = getComputedStyle(el);
       return r.width > 0 && r.height > 0 && cs.visibility !== "hidden" && cs.display !== "none";
     };
+
     const waitFor = async (sel, timeout = 9000, root = document) => {
       const t0 = performance.now();
       while (performance.now() - t0 < timeout) {
@@ -84,30 +122,6 @@ async function injectAndRun(tabId, opts) {
       return null;
     };
 
-    // ---------- Shorts UI guard (detect only; do NOT reload here) ----------
-    const shortsUiLikelyPresent = () => {
-      // Be generous: any of these implies the UI is mounted
-      return !!document.querySelector(
-        [
-          // header/overlay menus
-          'ytd-reel-player-header-renderer ytd-menu-renderer',
-          'ytd-reel-player-overlay-renderer ytd-menu-renderer',
-          // kebab buttons with aria labels
-          'ytd-reel-player-header-renderer [aria-label*="more" i]',
-          'ytd-reel-player-overlay-renderer [aria-label*="more" i]',
-          // direct save action sometimes appears
-          'ytd-reel-player-overlay-renderer [aria-label*="save" i]',
-          // actions rail presence is also fine
-          'ytd-reel-player-overlay-renderer #actions',
-        ].join(', ')
-      );
-    };
-
-    if (isShorts && !shortsUiLikelyPresent()) {
-      // Tell the service worker we want a reload + reinjection
-      return { ok: false, needsReload: true, error: "Shorts UI not ready" };
-    }
-
     // ---- OPEN SAVE DIALOG (watch) ----
     const openSaveDialogWatch = async () => {
       const meta = await waitFor("ytd-watch-metadata", 9000);
@@ -120,7 +134,6 @@ async function injectAndRun(tabId, opts) {
         document.querySelector("ytd-watch-metadata ytd-menu-renderer"),
       ].filter(Boolean);
 
-      // nudge layout
       window.scrollBy({ top: 1, behavior: "instant" }); await sleep(60);
       window.scrollBy({ top: -1, behavior: "instant" });
 
@@ -146,7 +159,7 @@ async function injectAndRun(tabId, opts) {
         const btns = meta.querySelectorAll("yt-icon-button button, #button-shape button");
         for (const b of btns) {
           const al = norm(b.getAttribute("aria-label"));
-          if (/more|more actions|options|menu/i.test(al || "")) return b;
+          if (/more|more actions|options|menu/.test(al)) return b;
         }
         return null;
       };
@@ -180,6 +193,12 @@ async function injectAndRun(tabId, opts) {
 
     // ---- OPEN SAVE DIALOG (shorts) ----
     const openSaveDialogShorts = async () => {
+      const headerOrOverlay = await waitFor("ytd-reel-player-header-renderer, ytd-reel-player-overlay-renderer, ytd-reel-video-renderer", 3500);
+      if (!headerOrOverlay) {
+        location.reload();
+        await new Promise(r => setTimeout(r, timing.postRefreshDelay || 2000));
+      }
+
       const overlay = await waitFor("ytd-reel-player-overlay-renderer, ytd-reel-video-renderer, ytd-reel-player-header-renderer", 9000);
       if (!overlay) return { dialog: null, via: "shorts", error: "Shorts overlay not found" };
 
@@ -201,7 +220,7 @@ async function injectAndRun(tabId, opts) {
           for (const b of btns) {
             const al = norm(b.getAttribute("aria-label"));
             if (!al) continue;
-            if (/(more|more actions|options|menu)/i.test(al) && isVisible(b)) return b;
+            if (/(more|more actions|options|menu)/.test(al) && isVisible(b)) return b;
           }
         }
         return null;
@@ -249,17 +268,16 @@ async function injectAndRun(tabId, opts) {
     };
 
     const openSaveDialog = async () => {
-      if (isShorts) return await openSaveDialogShorts();
-      return await openSaveDialogWatch();
+      return location.pathname.startsWith("/shorts/")
+        ? openSaveDialogShorts()
+        : openSaveDialogWatch();
     };
 
-    // ---- Attempt loop: open → wait → (check/click) → wait → close → wait → reopen → wait → verify ----
-    let via = isShorts ? "shorts" : "watch";
+    let via = location.pathname.startsWith("/shorts/") ? "shorts" : "watch";
     for (let attempt = 1; attempt <= timing.maxAttempts; attempt++) {
+
       const open1 = await openSaveDialog();
       if (!open1.dialog) {
-        if (open1.error && /Shorts.*not found|menu did not open|Shorts overlay/.test(open1.error))
-          return { ok: false, needsReload: true, error: open1.error }; // tell SW to reload/retry
         if (attempt === timing.maxAttempts) return { ok: false, error: open1.error || "Save dialog did not appear (first open)" };
         await sleep(350);
         continue;
@@ -285,8 +303,6 @@ async function injectAndRun(tabId, opts) {
 
       const open2 = await openSaveDialog();
       if (!open2.dialog) {
-        if (open2.error && /Shorts/.test(open2.error))
-          return { ok: false, needsReload: true, error: open2.error };
         if (attempt === timing.maxAttempts) return { ok: false, error: open2.error || "Save dialog did not appear (second open)" };
         await sleep(350);
         continue;
@@ -316,39 +332,32 @@ async function injectAndRun(tabId, opts) {
     return { ok: false, error: "Watch later not confirmed after retries", via, confirmed: false };
   };
 
-  // Service-worker loop: handle Shorts reloads + reinjection here
-  let reloads = 0;
-  while (true) {
-    const [inj] = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: runner,
-      args: [{ delayOpen, delayClick, delayClose, delayReopen, delayReload, maxAttempts }]
-    });
+  const [inj] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: runner,
+    args: [{
+      delayOpen, delayClick, delayClose, delayReopen, maxAttempts, postRefreshDelay
+    }]
+  });
 
-    const result = inj?.result || { ok: false, error: "No result from content script" };
+  const result = inj?.result || { ok: false, error: "No result from content script" };
 
-    if (result.needsReload && reloads < reloadMax) {
-      // SW-controlled reload + wait, then loop to reinject
-      try { await chrome.tabs.reload(tabId); } catch {}
-      await sleep(delayReload);
-      reloads++;
-      continue;
-    }
-
-    // Final outcome
-    if (result.ok && closeOnSuccess) {
-      try { await chrome.tabs.remove(tabId); } catch {}
-    }
-    return result;
+  if (result.ok && closeOnSuccess) {
+    try { await chrome.tabs.remove(tabId); } catch {}
   }
+  return result;
 }
 
 // ---------- Batch processor ----------
 async function processTabs({
   onlyActive = false,
   closeOnSuccess = true,
-  closeNonVideo = true
+  closeNonVideo = true,
+  activateEachTab = true,
+  focusWindow = true,
+  activationDelay = 500,
 } = {}) {
+
   let tabs = [];
   if (onlyActive) {
     const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -357,20 +366,33 @@ async function processTabs({
     tabs = await chrome.tabs.query({});
   }
 
-  const yt = tabs.filter(t => /youtube\.com|youtu\.be/.test(t.url || ""));
-  const res = { processed: 0, success: 0, closed: 0, skipped: 0, errors: 0, details: [], candidateCount: yt.length };
+  const ytTabs = tabs.filter(t => isYouTubeUrl(t.url || ""));
 
-  for (const t of yt) {
-    const vid = extractVideoIdFromUrl(t.url || "");
+  const res = {
+    processed: 0, success: 0, closed: 0, skipped: 0, errors: 0,
+    details: [], candidateCount: ytTabs.length
+  };
+
+  for (const t of ytTabs) {
+    const url = t.url || "";
+    const vid = extractVideoIdFromUrl(url);
+
+    // Non-video YouTube tabs (e.g., homepage, history, search)
     if (!vid) {
       if (closeNonVideo) {
         try { await chrome.tabs.remove(t.id); res.closed++; } catch {}
-        res.details.push({ tabId: t.id, url: t.url, status: "closed_non_video" });
+        await waitForTabClosed(t.id, 2000); // ensure it's gone before moving on
+        res.details.push({ tabId: t.id, url, status: "closed_non_video" });
       } else {
-        res.details.push({ tabId: t.id, url: t.url, status: "skipped_non_video" });
+        res.details.push({ tabId: t.id, url, status: "skipped_non_video" });
       }
       res.skipped++;
       continue;
+    }
+
+    if (activateEachTab) {
+      await ensureFocused(t);
+      await sleep(activationDelay);
     }
 
     try {
@@ -380,21 +402,25 @@ async function processTabs({
         delayClick: 2474,
         delayClose: 2474,
         delayReopen: 4747,
-        delayReload: 4747,
         maxAttempts: 7,
-        reloadMax: 3,
+        postRefreshDelay: 2000
       });
       res.processed++;
       if (r.ok) {
-        res.success++; if (closeOnSuccess) res.closed++;
-        res.details.push({ tabId: t.id, url: t.url, status: "added", via: r.via || "unknown", confirmed: !!r.confirmed, attempts: r.attempts || 1 });
+        if (closeOnSuccess) {
+          // Wait until the tab is actually closed to avoid focusing the next tab prematurely
+          await waitForTabClosed(t.id, 5000);
+          res.closed++;
+        }
+        res.success++;
+        res.details.push({ tabId: t.id, url, status: "added", via: r.via || "unknown", confirmed: !!r.confirmed, attempts: r.attempts || 1 });
       } else {
         res.errors++;
-        res.details.push({ tabId: t.id, url: t.url, status: "error", error: r.error });
+        res.details.push({ tabId: t.id, url, status: "error", error: r.error });
       }
     } catch (e) {
       res.processed++; res.errors++;
-      res.details.push({ tabId: t.id, url: t.url, status: "error", error: String(e) });
+      res.details.push({ tabId: t.id, url, status: "error", error: String(e) });
     }
 
     await sleep(220);
@@ -411,6 +437,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         onlyActive: false,
         closeOnSuccess: !!msg.options?.closeOnSuccess,
         closeNonVideo: !!msg.options?.closeNonVideo,
+        activateEachTab: true,
+        focusWindow: true,
+        activationDelay: 500
       });
       sendResponse({ ok: true, res: r });
     } else if (msg?.type === "RUN_ACTIVE") {
@@ -418,6 +447,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         onlyActive: true,
         closeOnSuccess: !!msg.options?.closeOnSuccess,
         closeNonVideo: !!msg.options?.closeNonVideo,
+        activateEachTab: true,
+        focusWindow: true,
+        activationDelay: 500
       });
       sendResponse({ ok: true, res: r });
     }
