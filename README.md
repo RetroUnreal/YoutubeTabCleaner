@@ -1,4 +1,4 @@
-# YoutubeTabCleaner
+# YoutubeTabCleaner - BROKEN ATM BECAUSE YOUTUBE CHANGED THEIR UI AGAIN INSTEAD OF FIXING BUGS.
 Chrome Browser Extension that adds all open Youtube video tabs to your watch later list. With an option to close non video tabs as well. Made for TAB HOARDERS like me...
 
 The extension will retry multiple times because the Youtube UI is kind of buggy, else it didnt actually add all videos to watch later.
