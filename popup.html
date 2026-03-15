@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>YouTube Watch Later Cleaner (No API)</title>
+  <style>
+    body { font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 12px; width: 360px; }
+    h1 { font-size: 16px; margin: 0 0 8px; }
+    .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+    .btn { width: 100%; padding: 10px 12px; border-radius: 8px; border: none; background:#e5e7eb; cursor:pointer; }
+    .btn:hover { background:#dfe2e7; }
+    .log { margin-top: 10px; max-height: 180px; overflow:auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; background:#11182710; padding:8px; border-radius:8px; }
+    .muted { color:#6b7280; font-size:12px; margin-top:4px; }
+    label { user-select:none; cursor:pointer; }
+    .check { width:16px; height:16px; }
+  </style>
+</head>
+<body>
+  <h1>YouTube Watch Later Cleaner (No API)</h1>
+  <div class="muted">Scans tabs with YouTube videos, clicks <em>Save → Watch later</em>, and (optionally) closes the tab.</div>
+
+  <div class="row">
+    <input id="closeAfter" type="checkbox" class="check" checked />
+    <label for="closeAfter">Close tab after adding successfully</label>
+  </div>
+  <div class="row">
+    <input id="closeNonVideo" type="checkbox" class="check" checked />
+    <label for="closeNonVideo">Close non-video YouTube tabs</label>
+  </div>
+
+  <div class="row">
+    <button id="runAll" class="btn">Scan & Add (all windows)</button>
+  </div>
+  <div class="row">
+    <button id="runActive" class="btn">Active tab only</button>
+  </div>
+
+  <div id="summary" class="muted"></div>
+  <div id="log" class="log"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
